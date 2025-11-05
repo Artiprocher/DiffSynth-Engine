@@ -91,7 +91,7 @@ class QwenImageLoRAConverter(LoRAStateDictConverter):
             if "lora_A.weight" in key:
                 lora_a_suffix = "lora_A.weight"
                 lora_b_suffix = "lora_B.weight"
-            
+
             if lora_a_suffix is None:
                 continue
 
@@ -253,19 +253,11 @@ class QwenImagePipeline(BasePipeline):
         )
 
         with LoRAContext():
-            attn_kwargs = {
-                "attn_impl": config.dit_attn_impl.value,
-                "sparge_smooth_k": config.sparge_smooth_k,
-                "sparge_cdfthreshd": config.sparge_cdfthreshd,
-                "sparge_simthreshd1": config.sparge_simthreshd1,
-                "sparge_pvthreshd": config.sparge_pvthreshd,
-            }
             if config.use_fbcache:
                 dit = QwenImageDiTFBCache.from_state_dict(
                     state_dicts.model,
                     device=("cpu" if config.use_fsdp else init_device),
                     dtype=config.model_dtype,
-                    attn_kwargs=attn_kwargs,
                     relative_l1_threshold=config.fbcache_relative_l1_threshold,
                 )
             else:
@@ -273,7 +265,6 @@ class QwenImagePipeline(BasePipeline):
                     state_dicts.model,
                     device=("cpu" if config.use_fsdp else init_device),
                     dtype=config.model_dtype,
-                    attn_kwargs=attn_kwargs,
                 )
             if config.use_fp8_linear:
                 enable_fp8_linear(dit)
@@ -548,6 +539,7 @@ class QwenImagePipeline(BasePipeline):
         entity_masks: Optional[List[torch.Tensor]] = None,
     ):
         self.load_models_to_device(["dit"])
+        attn_kwargs = self.config.get_attn_kwargs(latents, self.device)
         noise_pred = self.dit(
             image=latents,
             edit=image_latents,
@@ -558,6 +550,7 @@ class QwenImagePipeline(BasePipeline):
             entity_text=entity_prompt_embs,
             entity_seq_lens=[mask.sum(dim=1) for mask in entity_prompt_emb_masks] if entity_prompt_emb_masks else None,
             entity_masks=entity_masks,
+            attn_kwargs=attn_kwargs,
         )
         return noise_pred
 

@@ -394,6 +394,7 @@ class WanSpeech2VideoPipeline(WanVideoPipeline):
         void_audio_input: torch.Tensor | None = None,
     ):
         latents = latents.to(dtype=self.config.model_dtype, device=self.device)
+        attn_kwargs = self.config.get_attn_kwargs(latents, self.device)
 
         noise_pred = model(
             x=latents,
@@ -408,6 +409,7 @@ class WanSpeech2VideoPipeline(WanVideoPipeline):
             drop_motion_frames=drop_motion_frames,
             audio_mask=audio_mask,
             void_audio_input=void_audio_input,
+            attn_kwargs=attn_kwargs,
         )
         return noise_pred
 
@@ -654,19 +656,12 @@ class WanSpeech2VideoPipeline(WanVideoPipeline):
         )
 
         with LoRAContext():
-            attn_kwargs = {
-                "attn_impl": config.dit_attn_impl.value,
-                "sparge_smooth_k": config.sparge_smooth_k,
-                "sparge_cdfthreshd": config.sparge_cdfthreshd,
-                "sparge_simthreshd1": config.sparge_simthreshd1,
-                "sparge_pvthreshd": config.sparge_pvthreshd,
-            }
             dit = WanS2VDiT.from_state_dict(
                 state_dicts.model,
                 config=model_config,
                 device=("cpu" if config.use_fsdp else init_device),
                 dtype=config.model_dtype,
-                attn_kwargs=attn_kwargs,
+                use_vsa=(config.dit_attn_impl.value == "vsa"),
             )
             if config.use_fp8_linear:
                 enable_fp8_linear(dit)

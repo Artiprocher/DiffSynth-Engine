@@ -323,6 +323,7 @@ class WanVideoPipeline(BasePipeline):
 
     def predict_noise(self, model, latents, image_clip_feature, image_y, timestep, context):
         latents = latents.to(dtype=self.config.model_dtype, device=self.device)
+        attn_kwargs = self.config.get_attn_kwargs(latents, self.device)
 
         noise_pred = model(
             x=latents,
@@ -330,6 +331,7 @@ class WanVideoPipeline(BasePipeline):
             context=context,
             clip_feature=image_clip_feature,
             y=image_y,
+            attn_kwargs=attn_kwargs,
         )
         return noise_pred
 
@@ -578,19 +580,12 @@ class WanVideoPipeline(BasePipeline):
             dit_state_dict = state_dicts.model
 
         with LoRAContext():
-            attn_kwargs = {
-                "attn_impl": config.dit_attn_impl.value,
-                "sparge_smooth_k": config.sparge_smooth_k,
-                "sparge_cdfthreshd": config.sparge_cdfthreshd,
-                "sparge_simthreshd1": config.sparge_simthreshd1,
-                "sparge_pvthreshd": config.sparge_pvthreshd,
-            }
             dit = WanDiT.from_state_dict(
                 dit_state_dict,
                 config=dit_config,
                 device=("cpu" if config.use_fsdp else init_device),
                 dtype=config.model_dtype,
-                attn_kwargs=attn_kwargs,
+                use_vsa=(config.dit_attn_impl.value == "vsa"),
             )
             if config.use_fp8_linear:
                 enable_fp8_linear(dit)
@@ -602,7 +597,7 @@ class WanVideoPipeline(BasePipeline):
                     config=dit_config,
                     device=("cpu" if config.use_fsdp else init_device),
                     dtype=config.model_dtype,
-                    attn_kwargs=attn_kwargs,
+                    use_vsa=(config.dit_attn_impl.value == "vsa"),
                 )
                 if config.use_fp8_linear:
                     enable_fp8_linear(dit2)
@@ -640,19 +635,22 @@ class WanVideoPipeline(BasePipeline):
     @staticmethod
     def _get_dit_type(model_state_dict: Dict[str, torch.Tensor] | Dict[str, Dict[str, torch.Tensor]]) -> str:
         # determine wan dit type by model params
+        def has_any_key(*xs):
+            return any(x in model_state_dict for x in xs)
+
         dit_type = None
-        if "high_noise_model" in model_state_dict and "low_noise_model" in model_state_dict:
+        if has_any_key("high_noise_model"):
             if model_state_dict["high_noise_model"]["patch_embedding.weight"].shape[1] == 36:
                 dit_type = "wan2.2-i2v-a14b"
             elif model_state_dict["high_noise_model"]["patch_embedding.weight"].shape[1] == 16:
                 dit_type = "wan2.2-t2v-a14b"
         elif model_state_dict["patch_embedding.weight"].shape[1] == 48:
             dit_type = "wan2.2-ti2v-5b"
-        elif "img_emb.emb_pos" in model_state_dict:
+        elif has_any_key("img_emb.emb_pos", "condition_embedder.image_embedder.pos_embed"):
             dit_type = "wan2.1-flf2v-14b"
-        elif "img_emb.proj.0.weight" in model_state_dict:
+        elif has_any_key("img_emb.proj.0.weight", "condition_embedder.image_embedder.norm1"):
             dit_type = "wan2.1-i2v-14b"
-        elif "blocks.39.self_attn.norm_q.weight" in model_state_dict:
+        elif has_any_key("blocks.39.self_attn.norm_q.weight", "blocks.39.attn1.norm_q.weight"):
             dit_type = "wan2.1-t2v-14b"
         else:
             dit_type = "wan2.1-t2v-1.3b"

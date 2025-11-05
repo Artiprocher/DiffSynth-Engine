@@ -17,7 +17,12 @@ from diffsynth_engine.models.flux import (
     flux_dit_config,
     flux_text_encoder_config,
 )
-from diffsynth_engine.configs import FluxPipelineConfig, FluxStateDicts, ControlType, ControlNetParams
+from diffsynth_engine.configs import (
+    FluxPipelineConfig,
+    FluxStateDicts,
+    ControlType,
+    ControlNetParams,
+)
 from diffsynth_engine.models.basic.lora import LoRAContext
 from diffsynth_engine.pipelines import BasePipeline, LoRAStateDictConverter
 from diffsynth_engine.pipelines.utils import accumulate, calculate_shift
@@ -507,20 +512,12 @@ class FluxImagePipeline(BasePipeline):
         vae_encoder = FluxVAEEncoder.from_state_dict(state_dicts.vae, device=init_device, dtype=config.vae_dtype)
 
         with LoRAContext():
-            attn_kwargs = {
-                "attn_impl": config.dit_attn_impl.value,
-                "sparge_smooth_k": config.sparge_smooth_k,
-                "sparge_cdfthreshd": config.sparge_cdfthreshd,
-                "sparge_simthreshd1": config.sparge_simthreshd1,
-                "sparge_pvthreshd": config.sparge_pvthreshd,
-            }
             if config.use_fbcache:
                 dit = FluxDiTFBCache.from_state_dict(
                     state_dicts.model,
                     device=("cpu" if config.use_fsdp else init_device),
                     dtype=config.model_dtype,
                     in_channel=config.control_type.get_in_channel(),
-                    attn_kwargs=attn_kwargs,
                     relative_l1_threshold=config.fbcache_relative_l1_threshold,
                 )
             else:
@@ -529,7 +526,6 @@ class FluxImagePipeline(BasePipeline):
                     device=("cpu" if config.use_fsdp else init_device),
                     dtype=config.model_dtype,
                     in_channel=config.control_type.get_in_channel(),
-                    attn_kwargs=attn_kwargs,
                 )
             if config.use_fp8_linear:
                 enable_fp8_linear(dit)
@@ -755,6 +751,7 @@ class FluxImagePipeline(BasePipeline):
         latents = latents.to(self.dtype)
         self.load_models_to_device(["dit"])
 
+        attn_kwargs = self.config.get_attn_kwargs(latents, self.device)
         noise_pred = self.dit(
             hidden_states=latents,
             timestep=timestep,
@@ -766,6 +763,7 @@ class FluxImagePipeline(BasePipeline):
             image_ids=image_ids,
             controlnet_double_block_output=double_block_output,
             controlnet_single_block_output=single_block_output,
+            attn_kwargs=attn_kwargs,
         )
         noise_pred = noise_pred[:, :image_seq_len]
         noise_pred = self.dit.unpatchify(noise_pred, height, width)
@@ -887,6 +885,8 @@ class FluxImagePipeline(BasePipeline):
             if self.offload_mode is not None:
                 empty_cache()
                 param.model.to(self.device)
+
+            attn_kwargs = self.config.get_attn_kwargs(latents, self.device)
             double_block_output, single_block_output = param.model(
                 hidden_states=latents,
                 control_condition=control_condition,
@@ -897,6 +897,7 @@ class FluxImagePipeline(BasePipeline):
                 image_ids=image_ids,
                 text_ids=text_ids,
                 guidance=guidance,
+                attn_kwargs=attn_kwargs,
             )
             if self.offload_mode is not None:
                 param.model.to("cpu")
