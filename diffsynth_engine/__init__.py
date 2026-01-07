@@ -27,6 +27,7 @@ from .pipelines import (
     SDXLImagePipeline,
     FluxImagePipeline,
     WanVideoPipeline,
+    WanDMDPipeline,
     QwenImagePipeline,
     Hunyuan3DShapePipeline,
 )
@@ -81,6 +82,7 @@ __all__ = [
     "FluxIPAdapter",
     "FluxRedux",
     "WanVideoPipeline",
+    "WanDMDPipeline",
     "QwenImagePipeline",
     "Hunyuan3DShapePipeline",
     "FluxInpaintingTool",

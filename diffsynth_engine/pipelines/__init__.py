@@ -4,6 +4,7 @@ from .sdxl_image import SDXLImagePipeline
 from .sd_image import SDImagePipeline
 from .wan_video import WanVideoPipeline
 from .wan_s2v import WanSpeech2VideoPipeline
+from .wan_dmd import WanDMDPipeline
 from .qwen_image import QwenImagePipeline
 from .hunyuan3d_shape import Hunyuan3DShapePipeline
 from .z_image import ZImagePipeline
@@ -16,6 +17,7 @@ __all__ = [
     "SDImagePipeline",
     "WanVideoPipeline",
     "WanSpeech2VideoPipeline",
+    "WanDMDPipeline",
     "QwenImagePipeline",
     "Hunyuan3DShapePipeline",
     "ZImagePipeline",

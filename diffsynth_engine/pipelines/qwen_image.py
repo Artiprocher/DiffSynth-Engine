@@ -393,9 +393,6 @@ class QwenImagePipeline(BasePipeline):
         self.dit.unload_loras()
         self.noise_scheduler.restore_config()
 
-    def apply_scheduler_config(self, scheduler_config: Dict):
-        self.noise_scheduler.update_config(scheduler_config)
-
     def prepare_latents(
         self,
         latents: torch.Tensor,
