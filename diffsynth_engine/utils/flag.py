@@ -7,7 +7,11 @@ logger = logging.get_logger(__name__)
 
 
 # 无损
-FLASH_ATTN_4_AVAILABLE = importlib.util.find_spec("flash_attn.cute.interface") is not None
+try:
+    # If `flash_attn` is not installed in the Python environment, this line of code will raise an error.
+    FLASH_ATTN_4_AVAILABLE = importlib.util.find_spec("flash_attn.cute.interface") is not None
+except:
+    FLASH_ATTN_4_AVAILABLE = False
 if FLASH_ATTN_4_AVAILABLE:
     logger.info("Flash attention 4 is available")
 else:
