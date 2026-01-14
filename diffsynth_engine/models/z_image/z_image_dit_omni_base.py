@@ -9,6 +9,14 @@ from torch.nn.utils.rnn import pad_sequence
 from diffsynth_engine.models.base import PreTrainedModel
 from diffsynth_engine.models.basic.transformer_helper import RMSNorm
 from diffsynth_engine.models.basic import attention as attention_ops
+from diffsynth_engine.utils.gguf import gguf_inference
+from diffsynth_engine.utils.fp8_linear import fp8_inference
+from diffsynth_engine.utils.parallel import (
+    cfg_parallel,
+    cfg_parallel_unshard,
+    sequence_parallel,
+    sequence_parallel_unshard,
+)
 
 
 ADALN_EMBED_DIM = 256
@@ -986,115 +994,126 @@ class ZImageOmniBaseDiT(PreTrainedModel):
         omni_mode = isinstance(x[0], list)
         device = x[0][-1].device if omni_mode else x[0].device
 
-        if omni_mode:
-            # Dual embeddings: noisy (t) and clean (t=1)
-            t_noisy = self.t_embedder(t * self.t_scale).type_as(x[0][-1])
-            t_clean = self.t_embedder(torch.ones_like(t) * self.t_scale).type_as(x[0][-1])
-            adaln_input = None
-        else:
-            # Single embedding for all tokens
-            adaln_input = self.t_embedder(t * self.t_scale).type_as(x[0])
-            t_noisy = t_clean = None
+        use_cfg = len(x) > 1 and isinstance(x[0], list)
+        fp8_linear_enabled = getattr(self, "fp8_linear_enabled", False)
+        with (
+            fp8_inference(fp8_linear_enabled),
+            gguf_inference(),
+            cfg_parallel((x, t, cap_feats, siglip_feats, image_noise_mask), use_cfg=use_cfg),
+        ):
+            if omni_mode:
+                # Dual embeddings: noisy (t) and clean (t=1)
+                t_noisy = self.t_embedder(t * self.t_scale).type_as(x[0][-1])
+                t_clean = self.t_embedder(torch.ones_like(t) * self.t_scale).type_as(x[0][-1])
+                adaln_input = None
+            else:
+                # Single embedding for all tokens
+                adaln_input = self.t_embedder(t * self.t_scale).type_as(x[0])
+                t_noisy = t_clean = None
 
-        # Patchify
-        if omni_mode:
-            (
+            # Patchify
+            if omni_mode:
+                (
+                    x,
+                    cap_feats,
+                    siglip_feats,
+                    x_size,
+                    x_pos_ids,
+                    cap_pos_ids,
+                    siglip_pos_ids,
+                    x_pad_mask,
+                    cap_pad_mask,
+                    siglip_pad_mask,
+                    x_pos_offsets,
+                    x_noise_mask,
+                    cap_noise_mask,
+                    siglip_noise_mask,
+                ) = self.patchify_and_embed_omni(x, cap_feats, siglip_feats, patch_size, f_patch_size, image_noise_mask)
+            else:
+                (
+                    x,
+                    cap_feats,
+                    x_size,
+                    x_pos_ids,
+                    cap_pos_ids,
+                    x_pad_mask,
+                    cap_pad_mask,
+                ) = self.patchify_and_embed(x, cap_feats, patch_size, f_patch_size)
+                x_pos_offsets = x_noise_mask = cap_noise_mask = siglip_noise_mask = None
+
+            # x embed & refine
+            x_seqlens = [len(xi) for xi in x]
+            x = self.all_x_embedder[f"{patch_size}-{f_patch_size}"](torch.cat(x, dim=0))  # embed
+            x, x_freqs, x_mask, _, x_noise_tensor = self._prepare_sequence(
+                list(x.split(x_seqlens, dim=0)), x_pos_ids, x_pad_mask, self.x_pad_token, x_noise_mask, device
+            )
+
+            for layer in self.noise_refiner:
+                x = layer(x=x, attn_mask=x_mask, freqs_cis=x_freqs, adaln_input=adaln_input, noise_mask=x_noise_tensor, adaln_noisy=t_noisy, adaln_clean=t_clean)
+
+            # Cap embed & refine
+            cap_seqlens = [len(ci) for ci in cap_feats]
+            cap_feats = self.cap_embedder(torch.cat(cap_feats, dim=0))  # embed
+            cap_feats, cap_freqs, cap_mask, _, _ = self._prepare_sequence(
+                list(cap_feats.split(cap_seqlens, dim=0)), cap_pos_ids, cap_pad_mask, self.cap_pad_token, None, device
+            )
+
+            for layer in self.context_refiner:
+                cap_feats = layer(x=cap_feats, attn_mask=cap_mask, freqs_cis=cap_freqs)
+
+            # Siglip embed & refine
+            siglip_seqlens = siglip_freqs = None
+            if omni_mode and siglip_feats[0] is not None and self.siglip_embedder is not None:
+                siglip_seqlens = [len(si) for si in siglip_feats]
+                siglip_feats = self.siglip_embedder(torch.cat(siglip_feats, dim=0))  # embed
+                siglip_feats, siglip_freqs, siglip_mask, _, _ = self._prepare_sequence(
+                    list(siglip_feats.split(siglip_seqlens, dim=0)),
+                    siglip_pos_ids,
+                    siglip_pad_mask,
+                    self.siglip_pad_token,
+                    None,
+                    device,
+                )
+
+                for layer in self.siglip_refiner:
+                    siglip_feats = layer(x=siglip_feats, attn_mask=siglip_mask, freqs_cis=siglip_freqs)
+
+            # Unified sequence
+            unified, unified_freqs, unified_mask, unified_noise_tensor = self._build_unified_sequence(
                 x,
-                cap_feats,
-                siglip_feats,
-                x_size,
-                x_pos_ids,
-                cap_pos_ids,
-                siglip_pos_ids,
-                x_pad_mask,
-                cap_pad_mask,
-                siglip_pad_mask,
-                x_pos_offsets,
+                x_freqs,
+                x_seqlens,
                 x_noise_mask,
-                cap_noise_mask,
-                siglip_noise_mask,
-            ) = self.patchify_and_embed_omni(x, cap_feats, siglip_feats, patch_size, f_patch_size, image_noise_mask)
-        else:
-            (
-                x,
                 cap_feats,
-                x_size,
-                x_pos_ids,
-                cap_pos_ids,
-                x_pad_mask,
-                cap_pad_mask,
-            ) = self.patchify_and_embed(x, cap_feats, patch_size, f_patch_size)
-            x_pos_offsets = x_noise_mask = cap_noise_mask = siglip_noise_mask = None
-
-        # x embed & refine
-        x_seqlens = [len(xi) for xi in x]
-        x = self.all_x_embedder[f"{patch_size}-{f_patch_size}"](torch.cat(x, dim=0))  # embed
-        x, x_freqs, x_mask, _, x_noise_tensor = self._prepare_sequence(
-            list(x.split(x_seqlens, dim=0)), x_pos_ids, x_pad_mask, self.x_pad_token, x_noise_mask, device
-        )
-
-        for layer in self.noise_refiner:
-            x = layer(x=x, attn_mask=x_mask, freqs_cis=x_freqs, adaln_input=adaln_input, noise_mask=x_noise_tensor, adaln_noisy=t_noisy, adaln_clean=t_clean)
-
-        # Cap embed & refine
-        cap_seqlens = [len(ci) for ci in cap_feats]
-        cap_feats = self.cap_embedder(torch.cat(cap_feats, dim=0))  # embed
-        cap_feats, cap_freqs, cap_mask, _, _ = self._prepare_sequence(
-            list(cap_feats.split(cap_seqlens, dim=0)), cap_pos_ids, cap_pad_mask, self.cap_pad_token, None, device
-        )
-
-        for layer in self.context_refiner:
-            cap_feats = layer(x=cap_feats, attn_mask=cap_mask, freqs_cis=cap_freqs)
-
-        # Siglip embed & refine
-        siglip_seqlens = siglip_freqs = None
-        if omni_mode and siglip_feats[0] is not None and self.siglip_embedder is not None:
-            siglip_seqlens = [len(si) for si in siglip_feats]
-            siglip_feats = self.siglip_embedder(torch.cat(siglip_feats, dim=0))  # embed
-            siglip_feats, siglip_freqs, siglip_mask, _, _ = self._prepare_sequence(
-                list(siglip_feats.split(siglip_seqlens, dim=0)),
-                siglip_pos_ids,
-                siglip_pad_mask,
-                self.siglip_pad_token,
-                None,
+                cap_freqs,
+                cap_seqlens,
+                cap_noise_mask,
+                siglip_feats,
+                siglip_freqs,
+                siglip_seqlens,
+                siglip_noise_mask,
+                omni_mode,
                 device,
             )
 
-            for layer in self.siglip_refiner:
-                siglip_feats = layer(x=siglip_feats, attn_mask=siglip_mask, freqs_cis=siglip_freqs)
+            # Main transformer layers
+            with sequence_parallel((unified, unified_freqs, unified_noise_tensor), seq_dims=(1, 1, 1)):
+                for layer_idx, layer in enumerate(self.layers):
+                    unified = layer(x=unified, attn_mask=unified_mask, freqs_cis=unified_freqs, adaln_input=adaln_input, noise_mask=unified_noise_tensor, adaln_noisy=t_noisy, adaln_clean=t_clean)
+                (unified,) = sequence_parallel_unshard((unified,), seq_dims=(1,), seq_lens=(unified.shape[1],))
 
-        # Unified sequence
-        unified, unified_freqs, unified_mask, unified_noise_tensor = self._build_unified_sequence(
-            x,
-            x_freqs,
-            x_seqlens,
-            x_noise_mask,
-            cap_feats,
-            cap_freqs,
-            cap_seqlens,
-            cap_noise_mask,
-            siglip_feats,
-            siglip_freqs,
-            siglip_seqlens,
-            siglip_noise_mask,
-            omni_mode,
-            device,
-        )
-
-        # Main transformer layers
-        for layer_idx, layer in enumerate(self.layers):
-            unified = layer(x=unified, attn_mask=unified_mask, freqs_cis=unified_freqs, adaln_input=adaln_input, noise_mask=unified_noise_tensor, adaln_noisy=t_noisy, adaln_clean=t_clean)
-
-        unified = (
-            self.all_final_layer[f"{patch_size}-{f_patch_size}"](
-                unified, noise_mask=unified_noise_tensor, c_noisy=t_noisy, c_clean=t_clean
+            unified = (
+                self.all_final_layer[f"{patch_size}-{f_patch_size}"](
+                    unified, noise_mask=unified_noise_tensor, c_noisy=t_noisy, c_clean=t_clean
+                )
+                if omni_mode
+                else self.all_final_layer[f"{patch_size}-{f_patch_size}"](unified, c=adaln_input)
             )
-            if omni_mode
-            else self.all_final_layer[f"{patch_size}-{f_patch_size}"](unified, c=adaln_input)
-        )
 
-        # Unpatchify
-        x = self.unpatchify(list(unified.unbind(dim=0)), x_size, patch_size, f_patch_size, x_pos_offsets)
+            # Unpatchify
+            x = self.unpatchify(list(unified.unbind(dim=0)), x_size, patch_size, f_patch_size, x_pos_offsets)
+
+        (x,) = cfg_parallel_unshard((x,), use_cfg=use_cfg)
 
         return x
 

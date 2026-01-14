@@ -393,8 +393,12 @@ class ZImageOmniBasePipeline(BasePipeline):
             comb_pred = self.predict_noise(latents, t, prompt_emb)[0]
         else:
             if not batch_cfg:
-                positive_noise_pred = self.predict_noise(latents, t, prompt_emb)[0]
-                negative_noise_pred = self.predict_noise(latents, t, negative_prompt_emb)[0]
+                latents_input = [[latents.transpose(0, 1)]]
+                image_emb = [image_emb]
+                image_latents = [image_latents] if image_latents is not None else None
+
+                positive_noise_pred = self.predict_noise(latents_input, t, prompt_emb, image_emb, image_latents)[0]
+                negative_noise_pred = self.predict_noise(latents_input, t, negative_prompt_emb, image_emb, image_latents)[0]
             else:
                 latents_input = [[latents.transpose(0, 1)], [latents.transpose(0, 1)]]
                 t = torch.concat([t, t], dim=0)
