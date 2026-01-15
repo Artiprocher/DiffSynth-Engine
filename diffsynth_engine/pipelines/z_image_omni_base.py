@@ -381,7 +381,10 @@ class ZImageOmniBasePipeline(BasePipeline):
         do_cfg = current_cfg_scale > 0 and negative_prompt_emb is not None
 
         if not do_cfg:
-            comb_pred = self.predict_noise(latents, t, prompt_emb)[0]
+            latents_input = [[latents.transpose(0, 1)]]
+            image_emb = [image_emb]
+            image_latents = [image_latents] if image_latents is not None else None
+            comb_pred = self.predict_noise(latents_input, t, prompt_emb, image_emb, image_latents)[0]
         else:
             if not batch_cfg:
                 latents_input = [[latents.transpose(0, 1)]]
