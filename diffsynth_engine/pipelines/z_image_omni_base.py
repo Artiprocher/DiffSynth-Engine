@@ -169,17 +169,8 @@ class ZImageOmniBasePipeline(BasePipeline):
 
     @classmethod
     def from_state_dict(cls, state_dicts: ZImageStateDicts, config: ZImagePipelineConfig) -> "ZImageOmniBasePipeline":
-        if config.parallelism > 1:
-            pipe = ParallelWrapper(
-                cfg_degree=config.cfg_degree,
-                sp_ulysses_degree=config.sp_ulysses_degree,
-                sp_ring_degree=config.sp_ring_degree,
-                tp_degree=config.tp_degree,
-                use_fsdp=config.use_fsdp,
-            )
-            pipe.load_module(cls._from_state_dict, state_dicts=state_dicts, config=config)
-        else:
-            pipe = cls._from_state_dict(state_dicts, config)
+        assert config.parallelism <= 1, "Z-Image-Omni-Base doesn't support parallelism > 1"
+        pipe = cls._from_state_dict(state_dicts, config)
         return pipe
 
     @classmethod
